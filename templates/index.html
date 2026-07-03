@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel hero">
+  <h1>Media Index</h1>
+  <p>Scan a folder, build a searchable video index, then add project names, tags, review status, ratings, notes, and safe rename suggestions.</p>
+</section>
+<section class="stats-grid">
+  <div class="stat"><strong>{{ stats.total }}</strong><span>Indexed Files</span></div>
+  <div class="stat"><strong>{{ stats.total_size_gb }} GB</strong><span>Total Size</span></div>
+  <div class="stat"><strong>{{ stats.needs_review }}</strong><span>Needs Review</span></div>
+</section>
+<section class="grid two">
+  <form class="panel" method="post" action="/scan">
+    <h2>Scan Folder</h2><label>Folder path</label>
+    <input name="folder_path" placeholder="Paste a folder path" required>
+    <label class="inline"><input type="checkbox" name="recursive" value="true" checked> Include subfolders</label>
+    <label class="inline"><input type="checkbox" name="make_thumbnails" value="true" checked> Generate thumbnails</label>
+    <button type="submit">Scan Now</button><p class="hint">FFmpeg is recommended for metadata and thumbnails.</p>
+  </form>
+  <form class="panel" method="get" action="/">
+    <h2>Search / Filter</h2><label>Search filenames, folders, notes, tags, project, codec</label>
+    <input name="q" value="{{ q }}" placeholder="client name, b-roll, 4k, interview...">
+    <label>Status</label><select name="status"><option value="" {% if not status %}selected{% endif %}>Any</option>{% for value,label in [('needs-review','Needs Review'),('approved','Approved'),('revised','Needs Revision'),('archive','Archive'),('reject','Reject')] %}<option value="{{ value }}" {% if status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+    <button type="submit">Search Index</button>
+  </form>
+</section>
+{% if stats.latest_scan %}<section class="panel small-panel"><strong>Latest scan:</strong> {{ stats.latest_scan.folder_path }} — {{ stats.latest_scan.files_seen }} seen, {{ stats.latest_scan.files_added }} added, {{ stats.latest_scan.files_updated }} updated.</section>{% endif %}
+<section class="panel"><h2>Indexed Videos</h2>{% if media %}<div class="table-wrap"><table><thead><tr><th>Thumb</th><th>File</th><th>Project / Status</th><th>Duration</th><th>Resolution</th><th>Codec</th><th>Tags</th><th>Folder</th></tr></thead><tbody>{% for item in media %}<tr><td class="thumb-cell">{% if item.thumbnail_path %}<img src="/thumb/{{ item.thumbnail_path.split('/')[-1] }}" alt="thumbnail">{% else %}<div class="no-thumb">No thumb</div>{% endif %}</td><td><a href="/media/{{ item.id }}">{{ item.current_filename }}</a><br><small>{{ ((item.file_size or 0) / 1000000) | round(1) }} MB</small></td><td>{{ item.project_name or '—' }}<br><span class="badge">{{ item.approval_status or 'needs-review' }}</span> <small>{{ item.rating or 0 }}/5</small></td><td>{{ item.duration_seconds or '—' }}</td><td>{% if item.width and item.height %}{{ item.width }}x{{ item.height }}{% else %}—{% endif %}</td><td>{{ item.codec or '—' }}</td><td>{{ item.tags or '—' }}</td><td><small>{{ item.folder_path }}</small></td></tr>{% endfor %}</tbody></table></div>{% else %}<p>No media indexed yet. Scan a folder to begin.</p>{% endif %}</section>
+{% endblock %}
