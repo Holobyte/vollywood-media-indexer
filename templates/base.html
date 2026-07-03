@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ app_name or 'Vollywood Media Indexer' }}</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <strong>Vollywood Media Indexer</strong>
+      <span class="tagline">Local video indexing + production notes</span>
+    </div>
+    <nav>
+      <a href="/">Index</a>
+      <a href="/duplicates">Duplicates</a>
+      <a href="/export.csv">Export CSV</a>
+      <a href="/health">Health</a>
+    </nav>
+  </header>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
