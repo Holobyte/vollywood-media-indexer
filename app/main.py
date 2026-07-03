@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 import re
 import shutil
 import sqlite3
@@ -16,7 +15,8 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Stre
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app.config import APP_NAME, APP_VERSION, DB_PATH, EXPORT_DIR, SUPPORTED_VIDEO_EXTENSIONS, THUMBNAIL_DIR
+from app.ai_notes import ai_note, local_note
+from app.config import APP_NAME, APP_VERSION, DB_PATH, SUPPORTED_VIDEO_EXTENSIONS, THUMBNAIL_DIR
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -34,86 +34,20 @@ def db() -> sqlite3.Connection:
     return conn
 
 
-def rowdict(row: sqlite3.Row | None) -> dict[str, Any] | None:
-    if row is None:
-        return None
-    return {k: row[k] for k in row.keys()}
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = [row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def init_db() -> None:
     with db() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS media_files (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                original_filename TEXT NOT NULL,
-                current_filename TEXT NOT NULL,
-                full_path TEXT NOT NULL UNIQUE,
-                folder_path TEXT NOT NULL,
-                file_ext TEXT NOT NULL,
-                file_size INTEGER DEFAULT 0,
-                created_at TEXT,
-                modified_at TEXT,
-                duration_seconds REAL,
-                width INTEGER,
-                height INTEGER,
-                codec TEXT,
-                frame_rate TEXT,
-                thumbnail_path TEXT,
-                fingerprint TEXT,
-                project_name TEXT DEFAULT '',
-                tags TEXT DEFAULT '',
-                notes TEXT DEFAULT '',
-                suggested_filename TEXT DEFAULT '',
-                approval_status TEXT DEFAULT 'needs-review',
-                rating INTEGER DEFAULT 0,
-                missing INTEGER DEFAULT 0,
-                indexed_at TEXT NOT NULL,
-                last_seen_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS rename_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                media_id INTEGER,
-                old_path TEXT NOT NULL,
-                new_path TEXT NOT NULL,
-                old_filename TEXT NOT NULL,
-                new_filename TEXT NOT NULL,
-                renamed_at TEXT NOT NULL,
-                status TEXT NOT NULL,
-                message TEXT DEFAULT ''
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS note_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                media_id INTEGER,
-                preset_key TEXT NOT NULL,
-                content TEXT NOT NULL,
-                generated_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS scan_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                folder_path TEXT NOT NULL,
-                recursive INTEGER DEFAULT 1,
-                files_seen INTEGER DEFAULT 0,
-                files_added INTEGER DEFAULT 0,
-                files_updated INTEGER DEFAULT 0,
-                started_at TEXT NOT NULL,
-                finished_at TEXT NOT NULL,
-                message TEXT DEFAULT ''
-            )
-            """
-        )
+        conn.execute("""CREATE TABLE IF NOT EXISTS media_files (id INTEGER PRIMARY KEY AUTOINCREMENT, original_filename TEXT NOT NULL, current_filename TEXT NOT NULL, full_path TEXT NOT NULL UNIQUE, folder_path TEXT NOT NULL, file_ext TEXT NOT NULL, file_size INTEGER DEFAULT 0, created_at TEXT, modified_at TEXT, duration_seconds REAL, width INTEGER, height INTEGER, codec TEXT, frame_rate TEXT, thumbnail_path TEXT, fingerprint TEXT, project_name TEXT DEFAULT '', tags TEXT DEFAULT '', notes TEXT DEFAULT '', suggested_filename TEXT DEFAULT '', approval_status TEXT DEFAULT 'needs-review', rating INTEGER DEFAULT 0, missing INTEGER DEFAULT 0, indexed_at TEXT NOT NULL, last_seen_at TEXT NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS rename_history (id INTEGER PRIMARY KEY AUTOINCREMENT, media_id INTEGER, old_path TEXT NOT NULL, new_path TEXT NOT NULL, old_filename TEXT NOT NULL, new_filename TEXT NOT NULL, renamed_at TEXT NOT NULL, status TEXT NOT NULL, message TEXT DEFAULT '')""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS note_history (id INTEGER PRIMARY KEY AUTOINCREMENT, media_id INTEGER, preset_key TEXT NOT NULL, content TEXT NOT NULL, generated_at TEXT NOT NULL, provider TEXT DEFAULT 'local', custom_prompt TEXT DEFAULT '')""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS scan_events (id INTEGER PRIMARY KEY AUTOINCREMENT, folder_path TEXT NOT NULL, recursive INTEGER DEFAULT 1, files_seen INTEGER DEFAULT 0, files_added INTEGER DEFAULT 0, files_updated INTEGER DEFAULT 0, started_at TEXT NOT NULL, finished_at TEXT NOT NULL, message TEXT DEFAULT '')""")
+        ensure_column(conn, "note_history", "provider", "TEXT DEFAULT 'local'")
+        ensure_column(conn, "note_history", "custom_prompt", "TEXT DEFAULT ''")
         conn.commit()
 
 
@@ -125,11 +59,7 @@ def startup() -> None:
 def ffprobe(path: Path) -> dict[str, Any]:
     if shutil.which("ffprobe") is None:
         return {}
-    cmd = [
-        "ffprobe", "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=width,height,codec_name,r_frame_rate:format=duration",
-        "-of", "json", str(path),
-    ]
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,codec_name,r_frame_rate:format=duration", "-of", "json", str(path)]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
@@ -138,13 +68,7 @@ def ffprobe(path: Path) -> dict[str, Any]:
         stream = (data.get("streams") or [{}])[0]
         fmt = data.get("format") or {}
         duration = fmt.get("duration")
-        return {
-            "duration_seconds": round(float(duration), 2) if duration else None,
-            "width": stream.get("width"),
-            "height": stream.get("height"),
-            "codec": stream.get("codec_name"),
-            "frame_rate": stream.get("r_frame_rate"),
-        }
+        return {"duration_seconds": round(float(duration), 2) if duration else None, "width": stream.get("width"), "height": stream.get("height"), "codec": stream.get("codec_name"), "frame_rate": stream.get("r_frame_rate")}
     except Exception:
         return {}
 
@@ -186,50 +110,14 @@ def scan_folder(folder_path: str, recursive: bool = True, thumbnails: bool = Tru
             thumb = make_thumb(path) if thumbnails else None
             fp = fingerprint(meta, path)
             existing = conn.execute("SELECT id, thumbnail_path FROM media_files WHERE full_path=?", (str(path),)).fetchone()
-            payload = {
-                "original_filename": path.name,
-                "current_filename": path.name,
-                "full_path": str(path),
-                "folder_path": str(path.parent),
-                "file_ext": path.suffix.lower(),
-                "file_size": stat.st_size,
-                "created_at": datetime.fromtimestamp(stat.st_ctime).isoformat(timespec="seconds"),
-                "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
-                "duration_seconds": meta.get("duration_seconds"),
-                "width": meta.get("width"),
-                "height": meta.get("height"),
-                "codec": meta.get("codec"),
-                "frame_rate": meta.get("frame_rate"),
-                "thumbnail_path": thumb or (existing["thumbnail_path"] if existing else None),
-                "fingerprint": fp,
-                "indexed_at": now(),
-                "last_seen_at": now(),
-            }
+            payload = {"original_filename": path.name, "current_filename": path.name, "full_path": str(path), "folder_path": str(path.parent), "file_ext": path.suffix.lower(), "file_size": stat.st_size, "created_at": datetime.fromtimestamp(stat.st_ctime).isoformat(timespec="seconds"), "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"), "duration_seconds": meta.get("duration_seconds"), "width": meta.get("width"), "height": meta.get("height"), "codec": meta.get("codec"), "frame_rate": meta.get("frame_rate"), "thumbnail_path": thumb or (existing["thumbnail_path"] if existing else None), "fingerprint": fp, "indexed_at": now(), "last_seen_at": now()}
             if existing:
                 updated += 1
-                conn.execute(
-                    """
-                    UPDATE media_files SET current_filename=:current_filename, folder_path=:folder_path,
-                    file_size=:file_size, modified_at=:modified_at, duration_seconds=:duration_seconds,
-                    width=:width, height=:height, codec=:codec, frame_rate=:frame_rate,
-                    thumbnail_path=:thumbnail_path, fingerprint=:fingerprint, last_seen_at=:last_seen_at,
-                    missing=0 WHERE id=:id
-                    """,
-                    {**payload, "id": existing["id"]},
-                )
+                conn.execute("""UPDATE media_files SET current_filename=:current_filename, folder_path=:folder_path, file_size=:file_size, modified_at=:modified_at, duration_seconds=:duration_seconds, width=:width, height=:height, codec=:codec, frame_rate=:frame_rate, thumbnail_path=:thumbnail_path, fingerprint=:fingerprint, last_seen_at=:last_seen_at, missing=0 WHERE id=:id""", {**payload, "id": existing["id"]})
             else:
                 added += 1
-                conn.execute(
-                    """
-                    INSERT INTO media_files (original_filename,current_filename,full_path,folder_path,file_ext,file_size,created_at,modified_at,duration_seconds,width,height,codec,frame_rate,thumbnail_path,fingerprint,indexed_at,last_seen_at)
-                    VALUES (:original_filename,:current_filename,:full_path,:folder_path,:file_ext,:file_size,:created_at,:modified_at,:duration_seconds,:width,:height,:codec,:frame_rate,:thumbnail_path,:fingerprint,:indexed_at,:last_seen_at)
-                    """,
-                    payload,
-                )
-        conn.execute(
-            "INSERT INTO scan_events (folder_path, recursive, files_seen, files_added, files_updated, started_at, finished_at, message) VALUES (?,?,?,?,?,?,?,?)",
-            (str(folder), int(recursive), len(files), added, updated, start, now(), "Scan complete"),
-        )
+                conn.execute("""INSERT INTO media_files (original_filename,current_filename,full_path,folder_path,file_ext,file_size,created_at,modified_at,duration_seconds,width,height,codec,frame_rate,thumbnail_path,fingerprint,indexed_at,last_seen_at) VALUES (:original_filename,:current_filename,:full_path,:folder_path,:file_ext,:file_size,:created_at,:modified_at,:duration_seconds,:width,:height,:codec,:frame_rate,:thumbnail_path,:fingerprint,:indexed_at,:last_seen_at)""", payload)
+        conn.execute("INSERT INTO scan_events (folder_path, recursive, files_seen, files_added, files_updated, started_at, finished_at, message) VALUES (?,?,?,?,?,?,?,?)", (str(folder), int(recursive), len(files), added, updated, start, now(), "Scan complete"))
         conn.commit()
     return {"seen": len(files), "added": added, "updated": updated}
 
@@ -273,18 +161,7 @@ def safe_name(name: str) -> str:
 
 def pattern_name(media: dict[str, Any], pattern: str, counter: int = 1) -> str:
     path = Path(media["full_path"])
-    values = {
-        "date": (media.get("modified_at") or now())[:10].replace("-", ""),
-        "stem": path.stem,
-        "original": Path(media.get("original_filename") or path.name).stem,
-        "resolution": f"{media.get('width') or 'x'}x{media.get('height') or 'x'}",
-        "duration": str(int(media.get("duration_seconds") or 0)),
-        "codec": media.get("codec") or "codec",
-        "project": media.get("project_name") or "project",
-        "status": media.get("approval_status") or "needs-review",
-        "counter": f"{counter:03d}",
-        "ext": path.suffix.lstrip("."),
-    }
+    values = {"date": (media.get("modified_at") or now())[:10].replace("-", ""), "stem": path.stem, "original": Path(media.get("original_filename") or path.name).stem, "resolution": f"{media.get('width') or 'x'}x{media.get('height') or 'x'}", "duration": str(int(media.get("duration_seconds") or 0)), "codec": media.get("codec") or "codec", "project": media.get("project_name") or "project", "status": media.get("approval_status") or "needs-review", "counter": f"{counter:03d}", "ext": path.suffix.lstrip(".")}
     try:
         return safe_name(pattern.format(**values))
     except KeyError as exc:
@@ -292,19 +169,21 @@ def pattern_name(media: dict[str, Any], pattern: str, counter: int = 1) -> str:
 
 
 def note_for(media: dict[str, Any], preset: str) -> str:
-    title = media.get("current_filename", "media")
-    if preset == "production":
-        return f"## Production Notes\n\nFile: {title}\nProject: {media.get('project_name') or 'Unassigned'}\nStatus: {media.get('approval_status')}\n\nReview picture quality, audio clarity, best usable moments, and whether this clip belongs in edit, archive, or client review."
-    if preset == "social":
-        return f"## Social Clip Ideas\n\nUse {title} for a short hook, captioned highlight, behind-the-scenes moment, or client-facing teaser. Look for a 6-15 second section with clear action or emotion."
-    if preset == "rename":
-        return f"## Rename Suggestion\n\nSuggested pattern: Vollywood_{{date}}_{{project}}_{{stem}}_{{counter}}.{{ext}}"
-    return f"## {preset.title()} Notes\n\nAdd review notes for {title}."
+    return local_note(media, preset)
 
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request, q: str = "", status: str = ""):
     return templates.TemplateResponse("index.html", {"request": request, "media": list_media(q, status), "q": q, "status": status, "stats": stats(), "app_name": APP_NAME})
+
+
+@app.get("/ai", response_class=HTMLResponse)
+def ai_page(request: Request):
+    import os
+    provider = os.getenv("VMI_AI_PROVIDER", "local")
+    model = os.getenv("VMI_OPENAI_MODEL", "gpt-4o-mini")
+    has_key = bool(os.getenv("VMI_OPENAI_API_KEY"))
+    return templates.TemplateResponse("ai.html", {"request": request, "app_name": APP_NAME, "provider": provider, "model": model, "has_key": has_key})
 
 
 @app.post("/scan")
@@ -331,13 +210,16 @@ def update_media(media_id: int, project_name: str = Form(""), tags: str = Form("
 
 
 @app.post("/media/{media_id}/note")
-def make_note(media_id: int, preset: str = Form("production"), append: bool = Form(True)):
+def make_note(media_id: int, preset: str = Form("production"), append: bool = Form(True), use_ai: bool = Form(False), custom_prompt: str = Form("")):
     media = get_media(media_id)
-    content = note_for(media, preset)
+    if use_ai:
+        content, provider = ai_note(media, preset, custom_prompt)
+    else:
+        content, provider = local_note(media, preset, custom_prompt), "local"
     new_notes = (media.get("notes") or "") + ("\n\n" if append and media.get("notes") else "") + content
     with db() as conn:
         conn.execute("UPDATE media_files SET notes=? WHERE id=?", (new_notes, media_id))
-        conn.execute("INSERT INTO note_history (media_id,preset_key,content,generated_at) VALUES (?,?,?,?)", (media_id, preset, content, now()))
+        conn.execute("INSERT INTO note_history (media_id,preset_key,content,generated_at,provider,custom_prompt) VALUES (?,?,?,?,?,?)", (media_id, preset, content, now(), provider, custom_prompt))
         conn.commit()
     return RedirectResponse(f"/media/{media_id}", status_code=303)
 

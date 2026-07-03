@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel hero"><h1>AI Notes</h1><p>Version 0.3.0 adds AI-ready note generation. The app still runs with local notes when no provider is configured.</p></section><section class="panel"><h2>Current Status</h2><p><strong>Provider:</strong> {{ provider }}</p><p><strong>Model:</strong> {{ model }}</p><p><strong>API key detected:</strong> {% if has_key %}Yes{% else %}No{% endif %}</p></section><section class="panel"><h2>Environment Variables</h2><pre>VMI_AI_PROVIDER=openai
+VMI_OPENAI_API_KEY=your_key_here
+VMI_OPENAI_MODEL=gpt-4o-mini</pre><p class="hint">Restart the app after changing environment variables. Do not commit keys to GitHub.</p></section><section class="panel"><h2>How to Use</h2><p>Open any media detail page, choose a preset, add optional custom direction, check Use AI provider, then generate notes. The notes are saved to the file record and note history.</p></section>
+{% endblock %}

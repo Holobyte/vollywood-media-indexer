@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 APP_NAME = "Vollywood Media Indexer"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
